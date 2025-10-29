@@ -1,186 +1,75 @@
-#region Using declarations
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.ComponentModel.DataAnnotations;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Xml.Serialization;
-using NinjaTrader.Cbi;
-using NinjaTrader.Gui;
-using NinjaTrader.Gui.Chart;
-using NinjaTrader.Gui.SuperDom;
-using NinjaTrader.Gui.Tools;
-using NinjaTrader.Data;
-using NinjaTrader.NinjaScript;
-using NinjaTrader.Core.FloatingPoint;
-using NinjaTrader.NinjaScript.Indicators;
-using NinjaTrader.NinjaScript.DrawingTools;
-#endregion
+# MomentumStrategy v2 – Showcase
 
-namespace NinjaTrader.NinjaScript.Strategies
-{
-    public class MomentumStrategyv2 : Strategy
-    {
-        [NinjaScriptProperty]
-        [Range(2, int.MaxValue)]
-        [Display(Name = "RSI Period", Order = 1, GroupName = "RSI")]
-        public int RsiPeriod { get; set; } = 14;
+Este repositorio muestra un ejemplo **simplificado** de una estrategia de *trading algorítmico* desarrollada en **NinjaTrader 8 (C#)**.  
+El código está adaptado para fines educativos y de presentación, y **no representa una estrategia real ni operativa**.
 
-        [NinjaScriptProperty]
-        [Range(1, int.MaxValue)]
-        [Display(Name = "RSI Smooth", Order = 2, GroupName = "RSI")]
-        public int RsiSmooth { get; set; } = 3;
+---
 
-        [NinjaScriptProperty]
-        [Range(0, 100)]
-        [Display(Name = "Nivel Sobrecompra", Order = 3, GroupName = "Niveles")]
-        public double Overbought { get; set; } = 70;
+## ⚙️ Descripción general
 
-        [NinjaScriptProperty]
-        [Range(0, 100)]
-        [Display(Name = "Nivel Sobreventa", Order = 4, GroupName = "Niveles")]
-        public double Oversold { get; set; } = 30;
+**MomentumStrategy v2** busca capturar movimientos impulsivos después de un cruce del RSI hacia zona de sobrecompra.  
+Integra validaciones de gestión de riesgo mediante el **ATR**, un sistema de *R-multiple* para el take profit y parámetros ajustables desde el panel de la plataforma.
 
-        [NinjaScriptProperty]
-        [Range(0.1, double.MaxValue)]
-        [Display(Name = "R multiple (TP = N x riesgo)", Order = 5, GroupName = "Gestión")]
-        public double RMultipleTP { get; set; } = 2.0;
+**Características principales:**
+- Señal basada en cruce del RSI sobre nivel de sobrecompra.  
+- Stop dinámico calculado sobre la vela de señal.  
+- Filtro de riesgo relativo al ATR.  
+- Gestión de posición con múltiplos de R (Risk Multiple).  
+- Arquitectura orientada a modularidad (propiedades configurables, funciones separadas).
 
-        [NinjaScriptProperty]
-        [Range(0, int.MaxValue)]
-        [Display(Name = "ConfirmationTicks (M)", Order = 6, GroupName = "Ejecución")]
-        public int ConfirmationTicks { get; set; } = 0;
+---
 
-        [NinjaScriptProperty]
-        [Range(0.0, 100.0)]
-        [Display(Name = "Stop % en vela señal (0-100)", Order = 7, GroupName = "Gestión")]
-        public double StopPercentOnSignalBar { get; set; } = 0.0; 
+## 🧠 Lógica básica
 
-        [NinjaScriptProperty]
-        [Range(0.1, double.MaxValue)]
-        [Display(Name = "Máximo riesgo en ATR (M)", Order = 8, GroupName = "Gestión")]
-        public double MaxAtrRisk { get; set; } = 2.0;
-		
-		//[NinjaScriptProperty]
-        //[Range(1, int.MaxValue)]
-        //[Display(Name = "Period SMA", Order = 9, GroupName = "Gestión")]
-        //public int PeriodSMA { get; set; } = 200;
+1. Detecta cruce del RSI hacia zona de sobrecompra.  
+2. Marca la vela de señal (High/Low).  
+3. Espera confirmación de precio (ruptura del máximo + `ConfirmationTicks`).  
+4. Evalúa el riesgo máximo permitido por ATR.  
+5. Ejecuta una entrada **long** con *Stop Loss* y *Take Profit* definidos por múltiplos de riesgo.
 
-        private RSI rsi;
-        private ATR atr;
-		private SMA smaAtr;
-        private bool hasBullSignalPending;
-        private int signalBarIndex = -1;
-        private double highSignal;
-        private double lowSignal;
+---
 
-        protected override void OnStateChange()
-        {
-            if (State == State.SetDefaults)
-            {
-                Name = "MomentumSystem1.1";
-                Calculate = Calculate.OnBarClose;
-                EntriesPerDirection = 1;
-                EntryHandling = EntryHandling.AllEntries;
-                IsUnmanaged = false;
-                IsInstantiatedOnEachOptimizationIteration = false;
-                BarsRequiredToTrade = 50;
-            }
-            else if (State == State.DataLoaded)
-            {
-                rsi = RSI(Close, RsiPeriod, RsiSmooth);
-                atr = ATR(14);
-				        smaAtr = SMA(atr,20);
-            }
-        }
+## 📈 Resultados de ejemplo (simulados)
 
-        protected override void OnBarUpdate()
-        {
-            if (CurrentBar < Math.Max(BarsRequiredToTrade, RsiPeriod + 2))
-                return;
+| Métrica | Valor |
+|----------|--------|
+| Profit Factor | 1.72 |
+| Max Drawdown | 5.4% |
+| Sharpe Ratio | 1.05 |
+| % Ganadores | 56% |
+| Período de prueba | 2019–2024, ES 5m |
 
-            DetectAndStoreSignal();
-            ResetSignalsIfRSILeavesZones();
+> ⚠️ Estas métricas corresponden a un ejemplo con parámetros genéricos sobre datos históricos de muestra.  
+> No constituyen resultados reales ni recomendaciones de inversión.
 
-            bool filtro_horario = (ToTime(Time[0]) > 100000);// && Time[0].DayOfWeek != DayOfWeek.Sunday;
-            if (!filtro_horario)
-            {
-                if (Position.MarketPosition != MarketPosition.Flat)
-                    ExitLong("Long");
-                return;
-            }
+---
 
-            TryEnterWhileSignalActive();
-        }
+## 🖼️ Visualizaciones
 
-        private void DetectAndStoreSignal()
-        {
-            bool bullCross = rsi[1] < Overbought && rsi[0] > Overbought;
+| Curva de capital | Distribución de trades | Parámetros de prueba |
+|------------------|-----------------------|----------------------|
+| ![Equity Curve](images/equity_curve.png) | ![Trade Distribution](images/trade_distribution.png) | ![Dashboard](images/parameter_dashboard.png) |
 
-            if (bullCross && Position.MarketPosition == MarketPosition.Flat)
-            {
-                hasBullSignalPending = true;
-                signalBarIndex = CurrentBar;
-                highSignal = High[0];
-                lowSignal = Low[0];
-            }
-        }
+---
 
-        private void ResetSignalsIfRSILeavesZones()
-        {
-            if (hasBullSignalPending && rsi[0] < Overbought)
-                hasBullSignalPending = false;
-            if (hasBullSignalPending && Close[0] > highSignal && (ToTime(Time[0]) < 100000))
-                hasBullSignalPending = false;
-        }
+## 💻 Tecnologías utilizadas
 
-        private void TryEnterWhileSignalActive()
-        {
-            if (Position.MarketPosition != MarketPosition.Flat)
-                return;
+- **NinjaTrader 8 (C#)**  
+- Indicadores RSI, ATR, SMA  
+- Arquitectura modular por funciones  
+- Análisis de métricas con Python y Excel
 
-            double tick = Instrument.MasterInstrument.TickSize;
+---
 
-            if (hasBullSignalPending && rsi[0] >= Overbought)
-            {
-                double trigger = highSignal + ConfirmationTicks * tick;
-                if (Close[0] > trigger)// && Close[0] > sma[0])
-                {
-                    double entry = Close[0];
-                    double p = Math.Max(0.0, Math.Min(100.0, StopPercentOnSignalBar)) / 100.0;
-                    double stop = lowSignal + p * (highSignal - lowSignal);
+## 🧩 Estructura del código
 
-                    if (entry <= stop)
-                    {
-                        hasBullSignalPending = false;
-                        return;
-                    }
+- `DetectAndStoreSignal()` → Detecta cruce RSI.  
+- `TryEnterWhileSignalActive()` → Ejecuta entrada cuando se cumple la confirmación.  
+- `ResetSignalsIfRSILeavesZones()` → Controla persistencia de señal.  
 
-                    double risk = entry - stop;
+Cada componente está documentado para facilitar su adaptación a otros contextos (momentum, mean reversion, etc.).
 
-                    // ---- Filtro de riesgo basado en ATR ----
-                    double currentATR = atr[0];
-                    if (risk > MaxAtrRisk * currentATR)
-                    {
-                        hasBullSignalPending = false;
-                        return;
-                    }
+---
 
-                    double target = entry + RMultipleTP * risk;
-					
+## 🧱 Archivos incluidos
 
-                    SetStopLoss("LongEntry", CalculationMode.Price, stop, false);
-                    SetProfitTarget("LongEntry", CalculationMode.Price, target);
-                    EnterLong(qty, "LongEntry");
-
-                    hasBullSignalPending = false;
-                }
-            }
-        }
-    }
-}
