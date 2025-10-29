@@ -1,0 +1,186 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MomentumStrategyv2 : Strategy
+    {
+        [NinjaScriptProperty]
+        [Range(2, int.MaxValue)]
+        [Display(Name = "RSI Period", Order = 1, GroupName = "RSI")]
+        public int RsiPeriod { get; set; } = 14;
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue)]
+        [Display(Name = "RSI Smooth", Order = 2, GroupName = "RSI")]
+        public int RsiSmooth { get; set; } = 3;
+
+        [NinjaScriptProperty]
+        [Range(0, 100)]
+        [Display(Name = "Nivel Sobrecompra", Order = 3, GroupName = "Niveles")]
+        public double Overbought { get; set; } = 70;
+
+        [NinjaScriptProperty]
+        [Range(0, 100)]
+        [Display(Name = "Nivel Sobreventa", Order = 4, GroupName = "Niveles")]
+        public double Oversold { get; set; } = 30;
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue)]
+        [Display(Name = "R multiple (TP = N x riesgo)", Order = 5, GroupName = "Gestión")]
+        public double RMultipleTP { get; set; } = 2.0;
+
+        [NinjaScriptProperty]
+        [Range(0, int.MaxValue)]
+        [Display(Name = "ConfirmationTicks (M)", Order = 6, GroupName = "Ejecución")]
+        public int ConfirmationTicks { get; set; } = 0;
+
+        [NinjaScriptProperty]
+        [Range(0.0, 100.0)]
+        [Display(Name = "Stop % en vela señal (0-100)", Order = 7, GroupName = "Gestión")]
+        public double StopPercentOnSignalBar { get; set; } = 0.0; 
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue)]
+        [Display(Name = "Máximo riesgo en ATR (M)", Order = 8, GroupName = "Gestión")]
+        public double MaxAtrRisk { get; set; } = 2.0;
+		
+		//[NinjaScriptProperty]
+        //[Range(1, int.MaxValue)]
+        //[Display(Name = "Period SMA", Order = 9, GroupName = "Gestión")]
+        //public int PeriodSMA { get; set; } = 200;
+
+        private RSI rsi;
+        private ATR atr;
+		private SMA smaAtr;
+        private bool hasBullSignalPending;
+        private int signalBarIndex = -1;
+        private double highSignal;
+        private double lowSignal;
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Name = "MomentumSystem1.1";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsUnmanaged = false;
+                IsInstantiatedOnEachOptimizationIteration = false;
+                BarsRequiredToTrade = 50;
+            }
+            else if (State == State.DataLoaded)
+            {
+                rsi = RSI(Close, RsiPeriod, RsiSmooth);
+                atr = ATR(14);
+				        smaAtr = SMA(atr,20);
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < Math.Max(BarsRequiredToTrade, RsiPeriod + 2))
+                return;
+
+            DetectAndStoreSignal();
+            ResetSignalsIfRSILeavesZones();
+
+            bool filtro_horario = (ToTime(Time[0]) > 100000);// && Time[0].DayOfWeek != DayOfWeek.Sunday;
+            if (!filtro_horario)
+            {
+                if (Position.MarketPosition != MarketPosition.Flat)
+                    ExitLong("Long");
+                return;
+            }
+
+            TryEnterWhileSignalActive();
+        }
+
+        private void DetectAndStoreSignal()
+        {
+            bool bullCross = rsi[1] < Overbought && rsi[0] > Overbought;
+
+            if (bullCross && Position.MarketPosition == MarketPosition.Flat)
+            {
+                hasBullSignalPending = true;
+                signalBarIndex = CurrentBar;
+                highSignal = High[0];
+                lowSignal = Low[0];
+            }
+        }
+
+        private void ResetSignalsIfRSILeavesZones()
+        {
+            if (hasBullSignalPending && rsi[0] < Overbought)
+                hasBullSignalPending = false;
+            if (hasBullSignalPending && Close[0] > highSignal && (ToTime(Time[0]) < 100000))
+                hasBullSignalPending = false;
+        }
+
+        private void TryEnterWhileSignalActive()
+        {
+            if (Position.MarketPosition != MarketPosition.Flat)
+                return;
+
+            double tick = Instrument.MasterInstrument.TickSize;
+
+            if (hasBullSignalPending && rsi[0] >= Overbought)
+            {
+                double trigger = highSignal + ConfirmationTicks * tick;
+                if (Close[0] > trigger)// && Close[0] > sma[0])
+                {
+                    double entry = Close[0];
+                    double p = Math.Max(0.0, Math.Min(100.0, StopPercentOnSignalBar)) / 100.0;
+                    double stop = lowSignal + p * (highSignal - lowSignal);
+
+                    if (entry <= stop)
+                    {
+                        hasBullSignalPending = false;
+                        return;
+                    }
+
+                    double risk = entry - stop;
+
+                    // ---- Filtro de riesgo basado en ATR ----
+                    double currentATR = atr[0];
+                    if (risk > MaxAtrRisk * currentATR)
+                    {
+                        hasBullSignalPending = false;
+                        return;
+                    }
+
+                    double target = entry + RMultipleTP * risk;
+					
+
+                    SetStopLoss("LongEntry", CalculationMode.Price, stop, false);
+                    SetProfitTarget("LongEntry", CalculationMode.Price, target);
+                    EnterLong(qty, "LongEntry");
+
+                    hasBullSignalPending = false;
+                }
+            }
+        }
+    }
+}
